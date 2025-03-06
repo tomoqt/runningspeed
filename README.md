@@ -1,7 +1,7 @@
-# <p align=center>Triboulet</p>
+# <p align=center>Dagonet</p>
 
 <p align="center">
-<img align="center" src="https://github.com/user-attachments/assets/c027171a-5c4f-4264-9981-06adc6e8dc8b">
+<img align="center" src="https://github.com/user-attachments/assets/573129ff-909c-4749-af5d-520e351990cb">
 </p>
 
 Making a full process from data collection to GRPO for a decent Mini model
