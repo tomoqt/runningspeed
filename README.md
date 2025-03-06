@@ -95,3 +95,5 @@ Citations:
       url={https://arxiv.org/abs/2502.11089}, 
 }
 ```
+
+Image from [Reddit](https://www.reddit.com/r/balatro/comments/1cuv4sa/what_if_there_were_more_than_5_legendary_jokers/)
