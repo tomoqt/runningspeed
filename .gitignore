@@ -1,0 +1,7 @@
+*.pkl
+*.bin
+*.pt
+__pycache__/
+checkpoints/
+plots/
+data/shakespeare/
