@@ -36,15 +36,7 @@ def plot_loss(train_hist, val_hist, i_eval, iter, run_name):
         
     # Correction for when we eval more early 
 
-    iter_eval = [x for x in iter_eval if x <= iter]
-    
-    if iter < 100:
-
-        extra_eval = [i for i in range(0,100,10) if i <= iter and i not in iter_eval]
-        iter_eval.extend(extra_eval)
-        iter_eval.sort()
-        val_hist = [val_hist[iter_eval.index(i)] if i in iter_eval else None for i in range(iter+1) if i % i_eval == 0 or (i< 100 and i % 10 == 0)]
-        
+    iter_eval = [x for x in iter_eval if x <= iter]        
     iter_eval = iter_eval[:len(val_hist)] # Ensures len
 
 
