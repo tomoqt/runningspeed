@@ -5,6 +5,7 @@ import pickle
 import argparse
 from contextlib import nullcontext
 
+import model
 from model import Transformer
 
 parser = argparse.ArgumentParser()
@@ -31,8 +32,8 @@ data_dir = args.data_dir
 checkpoint = torch.load(ckpath, map_location=device, weights_only=True)
 state_dict = checkpoint['model']
 
+model.config['device'] = device
 model.config['ctx_len'] = args.ctx_len
-model.config['device'] = args.device
 model.config['n_embd'] = args.n_embd
 model.config['n_head'] = args.n_head
 model.config['n_layer'] = args.n_layer
