@@ -18,7 +18,7 @@ parser.add_argument('--n_layer', type=int, default=2, help='Number of layers')
 parser.add_argument('--n_experts', type=int, default=8, help='Number of experts per MoE layer')
 parser.add_argument('--ctx_len', type=int, default=1024, help='Context length')
 parser.add_argument('--max_tok', type=int, default=2048, help='Maximum number of tokens to generate')
-parser.add_argument('--types', nargs='*', type=str, default=['peer_ultramem', 'peer_ultramem'])
+parser.add_argument('--types', nargs='*', type=str, default=['mlp', 'moe'])
 parser.add_argument('--temp', type=float, default=1.0, help='Sampling temperature')
 parser.add_argument('--top_k', type=int, default=50, help='Top-k sampling')
 
