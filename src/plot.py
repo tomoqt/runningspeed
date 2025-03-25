@@ -33,12 +33,9 @@ def plot_loss(train_hist, val_hist, i_eval, iter, run_name):
 
     iter_train = range(len(train_hist))
     iter_eval = range(0, len(val_hist) * i_eval, i_eval)
-        
-    # Correction for when we eval more early 
 
     iter_eval = [x for x in iter_eval if x <= iter]        
     iter_eval = iter_eval[:len(val_hist)] # Ensures len
-
 
     l_train = plt.plot(iter_train, train_hist, label='Train', color='royalblue', linestyle='-', linewidth=2, marker='', alpha=0.7)
     val_line = plt.plot(iter_eval, val_hist, label='Val', color='palevioletred', linestyle='-', linewidth=2, marker='', alpha=0.7)
