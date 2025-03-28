@@ -2,6 +2,9 @@
 *.bin
 *.pt
 __pycache__/
+data/__pycache__/
 checkpoints/
 plots/
 data/shakespeare/
+data/tokenized_data/
+data/finewebedu10b/
