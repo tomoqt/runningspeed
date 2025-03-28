@@ -141,7 +141,8 @@ def estimate_loss():
 # get data func
 
 def get_batch(split):
-    split_filenames = glob.glob(os.path.join("data", f"{data_dir}", f"{data_dir}_{split}_*.bin"))
+
+    split_filenames = glob.glob(os.path.join("data", f"{data_dir}", f"{split}_*.bin"))
 
     if not split_filenames:
         raise FileNotFoundError(f"No {split} shard files found in {data_dir}")

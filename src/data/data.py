@@ -4,140 +4,126 @@ import numpy as np
 import torch
 import glob
 from tqdm import tqdm
+import sys
 import multiprocessing as mp
+from functools import partial
+import mmap
 
-# --- hyperparameters ---
-shard_size = 1000000 # 1 million tokens per shard
-data_dir = "data" # parent folder for all datasets
-block_size = 256 # context length of the model
-batch_size = 64 # batch size for data loading
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-# --- --- ---
+# Add parent directory to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tokenizer import FastBPE  # Our optimized BPE tokenizer
 
-# Get dataset folder from user input
-dataset_folder = "shakespeare"
-dataset_path = dataset_folder
-DATA_CACHE_DIR = dataset_path # reuse variable name for output
+# --- Config ---
+shard_size = 10_000_000  # 10M tokens/shard
+data_dir = "data"
+dataset_folder = "finewebedu10b/fineweb_chunks"
+output_dir = "tokenized_data"
+tokenizer_path = "models/fineweb_bpe.bin"
+max_workers = mp.cpu_count() // 2  # Leave some cores free
+# ---
 
-# Check if the dataset folder exists
-if not os.path.exists(dataset_path):
-    print(f"Error: Dataset folder not found at {dataset_path}")
-    exit()
+# Initialize tokenizer in main process
+tokenizer = FastBPE()
+tokenizer.load(tokenizer_path)
+print(f"Loaded tokenizer with {len(tokenizer.vocab):,} merges")
 
-# Read all text files in the dataset folder
-input_files = glob.glob(os.path.join(dataset_path, "*.txt"))
-if not input_files:
-    print(f"Error: No .txt files found in {dataset_path}")
-    exit()
-
-data = ""
-for file_path in input_files:
-    with open(file_path, 'r') as f:
-        data += f.read()
-
-chars = sorted(list(set(data)))
-vocab_size = len(chars)
-
-# token mappings
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-
-def encode(s):
-    return [stoi[c] for c in s]
-def decode(l):
-    return ''.join([itos[i] for i in l])
-
-# tokenize the whole dataset
-all_ids = encode(data)
-all_ids_np = np.array(all_ids, dtype=np.uint16) # tokenize and convert to numpy array once
-
-# train/val split (before sharding for consistent split across shards)
-n = len(all_ids_np)
-train_ids = all_ids_np[:int(n*0.9)]
-val_ids = all_ids_np[int(n*0.9):]
-
-# --- Sharding logic ---
-def write_datafile(filename, data_shard):
-    header = np.zeros(256, dtype=np.int32)
-    header[0] = 20240520 # magic number for cross-implementation compatibility
-    header[1] = 1 # data format version
-    header[2] = len(data_shard)
-    with open(filename, "wb") as f:
+def write_shard(filename, tokens):
+    """Write token shard with proper dtype handling"""
+    header = np.array([20240520, 1, len(tokens)], dtype=np.uint32)
+    
+    # Determine appropriate dtype
+    max_token = max(tokens) if tokens else 0
+    dtype = np.uint32 if max_token > 65535 else np.uint16
+    
+    with open(filename, 'wb') as f:
+        # Write header
         f.write(header.tobytes())
-        f.write(data_shard.tobytes())
+        # Write tokens with appropriate dtype
+        f.write(np.array(tokens, dtype=dtype).tobytes())
 
-def shard_dataset(ids, split_name):
-    shard_index = 0
-    token_count = 0
-    all_tokens_np = np.empty((shard_size,), dtype=np.uint16) # preallocate buffer
-    progress_bar = tqdm(total=len(ids), unit="tokens", desc=f"Sharding {split_name}")
+def process_chunk(args):
+    """Process file chunk with error handling"""
+    file_path, tokenizer = args
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+            return tokenizer.encode(text)
+    except Exception as e:
+        print(f"Skipping {file_path}: {str(e)}")
+        return []
 
-    for token in ids:
-        if token_count < shard_size:
-            all_tokens_np[token_count] = token
-            token_count += 1
-        else:
-            # write current shard and start a new one
-            filename = os.path.join(DATA_CACHE_DIR, f"{dataset_folder}_{split_name}_{shard_index:06d}.bin")
-            write_datafile(filename, all_tokens_np)
-            shard_index += 1
-            token_count = 0
-            all_tokens_np = np.empty((shard_size,), dtype=np.uint16) # re-preallocate
-            all_tokens_np[token_count] = token # put current token in new shard
-            token_count += 1
-        progress_bar.update(1)
+def parallel_tokenize(files, tokenizer, workers=max_workers):
+    """Parallel tokenization with proper chunking"""
+    # Split files into chunks for better load balancing
+    chunk_size = max(1, len(files) // (workers * 4))
+    
+    with mp.Pool(workers, initializer=init_worker, initargs=(tokenizer_path,)) as pool:
+        # Process files in chunks
+        tokens = []
+        for result in tqdm(pool.imap_unordered(process_chunk, 
+                                             ((f, tokenizer) for f in files),
+                                             chunksize=chunk_size),
+                          total=len(files), desc="Tokenizing"):
+            tokens.extend(result)
+        return tokens
 
-    # write last shard if any tokens remaining
-    if token_count > 0:
-        filename = os.path.join(DATA_CACHE_DIR, f"{dataset_folder}_{split_name}_{shard_index:06d}.bin")
-        write_datafile(filename, all_tokens_np[:token_count]) # only write filled part
-    progress_bar.close()
-    print(f"Sharded {split_name} data into {shard_index + (1 if token_count > 0 else 0)} files.")
+def init_worker(tokenizer_path):
+    """Initialize worker with tokenizer"""
+    global tokenizer
+    tokenizer = FastBPE()
+    tokenizer.load(tokenizer_path)
 
+def create_shards(tokens, output_dir, split_name):
+    """Create shards with memory efficiency"""
+    os.makedirs(output_dir, exist_ok=True)
+    num_shards = (len(tokens) + shard_size - 1) // shard_size
+    
+    # Process shards sequentially to avoid memory issues
+    for i in tqdm(range(num_shards), desc=f"Writing {split_name} shards"):
+        start = i * shard_size
+        end = start + shard_size
+        shard_path = os.path.join(output_dir, f"{split_name}_{i:06d}.bin")
+        write_shard(shard_path, tokens[start:end])
+    
+    return num_shards
 
-print("Sharding training data...")
-shard_dataset(train_ids, "train")
-print("Sharding validation data...")
-shard_dataset(val_ids, "val")
+def write_shard_parallel(args):
+    """Parallel shard writer"""
+    i, tokens, output_dir, split_name = args
+    shard_path = os.path.join(output_dir, f"{split_name}_{i:06d}.bin")
+    write_shard(shard_path, tokens)
 
+if __name__ == '__main__':
+    # Prepare paths
+    input_path = os.path.join(data_dir, dataset_folder)
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Dataset not found at {input_path}")
 
-# save the meta information as well, to help us encode/decode later
-meta = {
-    'vocab_size': vocab_size,
-    'itos': itos,
-    'stoi': stoi,
-    'block_size': block_size, # also save block_size and other relevant params for later use
-    'vocab_source': 'char' # or 'bpe' or 'word' etc
-}
+    # Get files (first 20 for demo)
+    files = sorted(glob.glob(os.path.join(input_path, "*.txt")))[:20]
+    if not files:
+        raise FileNotFoundError("No .txt files found in dataset directory")
 
-meta_pkl_path = os.path.join(DATA_CACHE_DIR, 'meta.pkl')
-with open(meta_pkl_path, 'wb') as f:
-    pickle.dump(meta, f)
+    # Process files in parallel
+    print(f"\nProcessing {len(files)} files with {max_workers} workers...")
+    tokens = parallel_tokenize(files, tokenizer)
+    print(f"Total tokens: {len(tokens):,}")
 
-print(f"Dataset files and meta.pkl created in: {DATA_CACHE_DIR}")
+    # Create shards in parallel
+    print("\nCreating training shards...")
+    train_shards = create_shards(tokens[:int(0.9*len(tokens))], output_dir, "train")
+    
+    print("\nCreating validation shards...")
+    val_shards = create_shards(tokens[int(0.9*len(tokens)):], output_dir, "val")
 
-# Add dataset folder to gitignore
-gitignore_path = '../../.gitignore'
-dataset_gitignore_entry = f"{data_dir}/{dataset_folder}/\n"
+    # Save metadata
+    meta = {
+        'vocab_size': len(tokenizer.vocab),
+        'block_size': 1024,
+        'tokenizer': tokenizer_path
+    }
+    
+    with open(os.path.join(output_dir, 'meta.pkl'), 'wb') as f:
+        pickle.dump(meta, f)
 
-if os.path.exists(gitignore_path):
-    with open(gitignore_path, 'r') as f:
-        gitignore_content = f.readlines()
-
-    found_dataset_entry = False
-    for line in gitignore_content:
-        if line.strip() == dataset_gitignore_entry.strip():
-            found_dataset_entry = True
-            break
-
-    if not found_dataset_entry:
-        with open(gitignore_path, 'a') as f:
-            f.write(dataset_gitignore_entry)
-            print(f"Added '{dataset_gitignore_entry.strip()}' to .gitignore")
-    else:
-        print(f"'{dataset_gitignore_entry.strip()}' already in .gitignore")
-
-else:
-    with open(gitignore_path, 'w') as f:
-        f.write(dataset_gitignore_entry)
-        print(f".gitignore created and added '{dataset_gitignore_entry.strip()}'")
+    print(f"\nDone! Created {train_shards} train + {val_shards} val shards in '{output_dir}'")
