@@ -226,7 +226,7 @@ else:
 
 if "cuda" in device:
     print("compiling the model...")
-    model = torch.compile(model, fullgraph=True, dynamic=False)#, mode="reduce-overhead") # reduce overhead is a good cudagraph check, use max-autotune when compute rich
+    model = torch.compile(model, fullgraph=True, dynamic=False, mode="reduce-overhead") 
     print("compiled")
 
 p = sum(p.numel() for p in m.parameters())

@@ -6,5 +6,5 @@ data/__pycache__/
 checkpoints/
 plots/
 src/data/shakespeare/
-src/data/tokenized_data/
-src/data/finewebedu10b/
+src/data/finewebedu10b/fineweb_chunks/
+src/data/tokenized_data_tiktoken/
