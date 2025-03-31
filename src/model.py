@@ -547,7 +547,7 @@ class Transformer(nn.Module):
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
-        tok_emb = self.token_embedding_table(idx)
+        tok_emb = self.token_embedding_table(idx).clone()
         pos_emb = self.position_embedding_table(torch.arange(T, device=self.config['device']))
         x = tok_emb + pos_emb
 

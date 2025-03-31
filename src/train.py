@@ -226,7 +226,7 @@ else:
 
 if "cuda" in device:
     print("compiling the model...")
-    model = torch.compile(model, fullgraph=True, dynamic=False, mode="reduce-overhead") 
+    model = torch.compile(model, fullgraph=True, dynamic=False) 
     print("compiled")
 
 p = sum(p.numel() for p in m.parameters())
