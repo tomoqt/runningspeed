@@ -8,3 +8,4 @@ plots/
 src/data/shakespeare/
 src/data/finewebedu10b/fineweb_chunks/
 src/data/tokenized_data_tiktoken/
+venv/

@@ -60,7 +60,7 @@ class RoPE(nn.Module):
         neg_half_x = self._neg_half(x_rope)
         x_out = (x_rope * self.cos_cached[:, :, :x.shape[1], :]) + (neg_half_x * self.sin_cached[:, :, :x.shape[1], :])
         return x_out
-
+#hyperbolic stuff
 def precompute_freqs_cis(dim, end, device, theta=10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device).float() / dim))
     t = torch.arange(end, device=device)
@@ -85,6 +85,55 @@ def apply_rope(x: torch.Tensor, y: torch.Tensor, freqs_cis) -> tuple[torch.Tenso
     y_rotated = torch.cat([y_rotated_real, y_rotated_imag], dim=-1)
     return x_rotated.type_as(x), y_rotated.type_as(y)
 
+
+# Hyperbolic geometry utility functions
+def mobius_addition(x, y, c):
+    """Mobius addition in hyperbolic space with curvature c"""
+    # Compute norms
+    x_norm = torch.norm(x, dim=-1, keepdim=True)
+    y_norm = torch.norm(y, dim=-1, keepdim=True)
+    # Compute the inner product
+    inner_product = torch.sum(x * y, dim=-1, keepdim=True)
+    
+    # Compute numerator and denominator following the standard formula
+    numerator = (1 + 2*c * inner_product + c * (y_norm ** 2)) * x + \
+                (1 - c * (x_norm ** 2)) * y
+    denominator = 1 + 2*c * inner_product + (c ** 2) * (x_norm ** 2) * (y_norm ** 2)
+    
+    return numerator / denominator
+
+def scaling_factor(x, c):
+    """Compute scaling factor for hyperbolic space with curvature c"""
+    x_norm = torch.norm(x, dim=-1, keepdim=True)
+    return 2/(1+c*x_norm**2)
+
+def expmap(x, v, c):
+    """Exponential map from tangent space to hyperbolic space with curvature c"""
+    scaling_factor_x = scaling_factor(x, c)
+    v_norm = torch.norm(v, dim=-1, keepdim=True)
+    second_term = (1/c**0.5)*torch.tanh((c*scaling_factor_x*v_norm**2/2)**0.5)*v/v_norm
+    return mobius_addition(x, second_term, c)
+
+def logmap(x, u, c):
+    """Logarithmic map from hyperbolic space to tangent space with curvature c"""
+    scaling_factor_x = scaling_factor(x, c)
+    mob_addition = mobius_addition(-x, u, c)
+    addition_norm = torch.norm(mob_addition, dim=-1, keepdim=True)
+    constant_factor = 2 / (scaling_factor_x * c**0.5)
+    direction_factor = mob_addition / addition_norm
+    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.999, max=0.999)  # Single-line fix
+    return constant_factor * torch.arctanh(arg) * direction_factor
+
+def calculate_reference_point(x):
+    """Calculate reference point for hyperbolic operations"""
+    B, T, C = x.size()
+    ref_point = torch.zeros_like(x[:, :1, :])
+    if T > 1:
+        ref_point = x[:, :-1, :]
+        ref_point = F.pad(ref_point, (0, 0, 1, 0), mode='constant', value=0)
+    return ref_point
+
+
 # MLA-NSA hybrid, not hardware optimized, just uses NSA sparsity for better training rn
 
 class Attn(nn.Module):
@@ -92,7 +141,7 @@ class Attn(nn.Module):
     Native Sparse Attention with Multi-headed Latent Attention integration.
     Combines MLA's compression techniques with NSA's natural sparsity, also better loss
     """
-    def __init__(self):
+    def __init__(self, curvature):
         super().__init__()
         self.device = config['device']
         self.n_embd = config['n_embd']
@@ -100,6 +149,8 @@ class Attn(nn.Module):
         self.dropout = config['dropout']
         self.ctx_len = config['ctx_len']
         self.rms_norm_eps = config.get('rms_norm_eps', 1e-6)
+        # Store curvature
+        self.c = curvature
 
         # Original MLA parameters
         self.v_head_dim = 32
@@ -225,9 +276,10 @@ class Attn(nn.Module):
 
     def forward(self, x):
         B, T, C = x.size()
-
+        reference_point = calculate_reference_point(x)
+        x_hyperbolic = logmap(reference_point, x, self.c)
         # === Prepare queries using MLA's approach ===
-        compressed_q = self.compress_q_linear(x)
+        compressed_q = self.compress_q_linear(x_hyperbolic)
         norm_q = self.q_norm(compressed_q)
         query_nope = self.decompress_q_nope(norm_q)
         query_rope = self.decompress_q_rope(norm_q)
@@ -406,24 +458,34 @@ class Attn(nn.Module):
         output = self.proj(output)
         output = self.res_dropout(output)
 
-        return output 
+        return output, reference_point
 
 # Reg MLP 
 
 class MLP(nn.Module):
-    def __init__(self):
+    def __init__(self, curvature):
         super().__init__()
         n_embd = config['n_embd']
         self.c_fc    = nn.Linear(n_embd, 4 * n_embd)
         self.gelu    = nn.GELU()
         self.c_proj  = nn.Linear(4 * n_embd, n_embd)
         self.dropout = nn.Dropout(config['dropout'])
+        # Initialize curvature parameter randomly
+        self.c = curvature
 
-    def forward(self, x):
+    def forward(self, x, reference_point=None):
         x = self.c_fc(x)
         x = self.gelu(x)
         x = self.c_proj(x)
         x = self.dropout(x)
+        
+        # Apply expmap to map from tangent space back to hyperbolic space
+        if reference_point is None:
+            reference_point = calculate_reference_point(x)
+        
+        # Apply exponential map to map back to hyperbolic space
+        x = expmap(reference_point, x, self.c)
+        
         return x
 
 # DS-MoE Layer
@@ -450,7 +512,12 @@ class DSMoE(nn.Module):
         self.num_experts = config["n_experts"]
         self.num_exp = num_exp
         self.moe_scaling = config["init_moe_scaling"]
-        self.experts = nn.ModuleList([MLP() for _ in range(self.num_experts)])
+        # Get the curvature parameter from parent block
+        self.c = nn.Parameter(torch.rand(1))  # Random initialization for curvature
+        self.c.requires_grad = True
+        
+        # Create MLP experts with curvature parameter
+        self.experts = nn.ModuleList([MLP(self.c) for _ in range(self.num_experts)])
         self.gate = nn.Sequential(
             nn.Linear(config['n_embd'], self.num_experts - 1),  # exclude shared expert
             UnitCenteredNoise(scaling=0.02),
@@ -460,7 +527,7 @@ class DSMoE(nn.Module):
         self.expert_bias = nn.Parameter(torch.zeros(self.num_experts - 1), requires_grad=False)
 
 
-    def forward(self, x):
+    def forward(self, x, reference_point=None):
         b, t, c = x.shape
         x_flat = x.reshape(b * t, c)
 
@@ -479,7 +546,8 @@ class DSMoE(nn.Module):
         gate_val_indices = torch.cat([torch.zeros_like(gate_val_indices[:, :1]), gate_val_indices + 1], dim=-1)
 
         # process all experts once (fully static)
-        expert_outputs = torch.stack([expert(x_flat) for expert in self.experts], dim=0)  # [num_experts, b*t, c]
+        # Pass reference point to all experts
+        expert_outputs = torch.stack([expert(x_flat, reference_point) for expert in self.experts], dim=0)  # [num_experts, b*t, c]
 
         # create routing weights matrix (one-hot * gate values)
         router_weights = torch.zeros(x_flat.size(0), self.num_experts, device=x.device)
@@ -499,11 +567,15 @@ class Block(nn.Module):
     def __init__(self, index):
         super().__init__()
         n_embd = config['n_embd']
-        self.attn = Attn()
+        # Initialize curvature parameter randomly for hyperbolic operations
+        self.c = nn.Parameter(torch.rand(1))  # Random initialization for curvature
+        self.c.requires_grad = True
+        
+        self.attn = Attn(self.c)
         self.ffn_type = config['type'][index]
 
         if self.ffn_type == "mlp":
-            self.ffn = MLP()
+            self.ffn = MLP(self.c)
         elif self.ffn_type == "moe":
             self.ffn = DSMoE(index)
         else:
@@ -513,15 +585,17 @@ class Block(nn.Module):
         self.rm2 = nn.RMSNorm(n_embd)
 
     def forward(self, x):
-
-        x = x + self.attn(self.rm1(x))
+        # Run attention and get both output and reference point
+        attn_output, reference_point = self.attn(self.rm1(x))
+        x = x + attn_output
         
         if self.ffn_type == "moe":
-            x_ffn, router_weights = self.ffn(self.rm2(x))
+            x_ffn, router_weights = self.ffn(self.rm2(x), reference_point)
             return x + x_ffn, router_weights
             
         else:
-            x_ffn = self.ffn(self.rm2(x))
+            # Pass the reference point to MLP
+            x_ffn = self.ffn(self.rm2(x), reference_point)
             return x + x_ffn, None # no MoE, no route weights
 
 class Transformer(nn.Module):
