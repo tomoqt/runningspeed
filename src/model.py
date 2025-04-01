@@ -127,10 +127,17 @@ def logmap(x, u, c):
 def calculate_reference_point(x):
     """Calculate reference point for hyperbolic operations"""
     B, T, C = x.size()
-    ref_point = torch.zeros_like(x[:, :1, :])
-    if T > 1:
-        ref_point = x[:, :-1, :]
-        ref_point = F.pad(ref_point, (0, 0, 1, 0), mode='constant', value=0)
+    
+    # If we have a sequence of length 1, we don't have a previous token
+    # so use a zero tensor as reference
+    if T <= 1:
+        return torch.zeros_like(x)
+    
+    # Otherwise, use the previous token's position as reference
+    # This handles causal scenarios well
+    ref_point = x[:, :-1, :]
+    ref_point = F.pad(ref_point, (0, 0, 1, 0), mode='constant', value=0)
+    
     return ref_point
 
 
@@ -482,6 +489,11 @@ class MLP(nn.Module):
         # Apply expmap to map from tangent space back to hyperbolic space
         if reference_point is None:
             reference_point = calculate_reference_point(x)
+        else:
+            # Ensure reference point has same batch shape as x
+            if reference_point.shape[0] != x.shape[0]:
+                # This handles cases where x was reshaped but reference_point wasn't
+                reference_point = reference_point.reshape(-1, reference_point.shape[-1])
         
         # Apply exponential map to map back to hyperbolic space
         x = expmap(reference_point, x, self.c)
@@ -530,6 +542,13 @@ class DSMoE(nn.Module):
     def forward(self, x, reference_point=None):
         b, t, c = x.shape
         x_flat = x.reshape(b * t, c)
+        
+        # Reshape reference point to match flattened input
+        if reference_point is not None:
+            # Reshape reference_point from [b, t, c] to [b*t, c]
+            reference_point_flat = reference_point.reshape(b * t, c)
+        else:
+            reference_point_flat = None
 
         gate_val_continuous = self.gate(x_flat)
 
@@ -546,8 +565,8 @@ class DSMoE(nn.Module):
         gate_val_indices = torch.cat([torch.zeros_like(gate_val_indices[:, :1]), gate_val_indices + 1], dim=-1)
 
         # process all experts once (fully static)
-        # Pass reference point to all experts
-        expert_outputs = torch.stack([expert(x_flat, reference_point) for expert in self.experts], dim=0)  # [num_experts, b*t, c]
+        # Pass flattened reference point to all experts
+        expert_outputs = torch.stack([expert(x_flat, reference_point_flat) for expert in self.experts], dim=0)  # [num_experts, b*t, c]
 
         # create routing weights matrix (one-hot * gate values)
         router_weights = torch.zeros(x_flat.size(0), self.num_experts, device=x.device)
