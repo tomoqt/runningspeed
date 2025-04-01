@@ -9,6 +9,7 @@ import string
 import random
 import pickle
 import argparse
+import heavyball
 import numpy as np
 from contextlib import nullcontext
 
@@ -213,7 +214,7 @@ else:
     model = Transformer()
     m = model.to(device)
 
-    optimizer = model.configure_optimizers(weight_decay, lr, (beta1, beta2), device)
+    optimizer = heavyball.ForeachPSGDKron(model.parameters(), lr=0.0018, weight_decay=1e-2) #model.configure_optimizers(weight_decay, lr, (beta1, beta2), device)
     warmup_scheduler = LinearLR(optimizer, start_factor=1e-3, total_iters=warmup_iters)
     cosine_scheduler = CosineAnnealingLR(optimizer, T_max=max_iters - warmup_iters, eta_min=min_lr)
     scheduler = SequentialLR(optimizer,

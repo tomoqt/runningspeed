@@ -1,7 +1,7 @@
 from datasets import load_dataset
 import os
 import time
-from tqdm import tqdm  # Import tqdm for progress bar
+from tqdm import tqdm
 
 # Configuration
 dataset_name = "HuggingFaceFW/fineweb-edu"

@@ -22,7 +22,7 @@ config = {
 # RoPE
 
 class RoPE(nn.Module):
-    def __init__(self, d, base=10000, device=config['device']):
+    def __init__(self, d, base=100_000_000_000, device=config['device']):
         super().__init__()
 
         self.base = base
